@@ -42,6 +42,65 @@ def parse_role(ctx: commands.Context, text: str) -> discord.Role | None:
     return None
 
 
+def strip_mentions(text: str) -> str:
+    text = re.sub(r"<@&\d+>", "", text)
+    text = re.sub(r"<@!?\d+>", "", text)
+    text = re.sub(r"<#\d+>", "", text)
+    return text.strip()
+
+
+async def send_help(ctx: commands.Context):
+    embed = discord.Embed(
+        title="RolePanel — ヘルプ",
+        description="ロールパネルの管理コマンド一覧です。\n全てのコマンドは **管理者限定** です。",
+        color=0x3498DB,
+    )
+    embed.add_field(
+        name="パネル管理",
+        value=(
+            "`!rp create <タイトル>` — パネルを作成\n"
+            "`!rp delete <パネルID>` — パネルを削除\n"
+            "`!rp list` — パネル一覧を表示\n"
+            "`!rp refresh <パネルID>` — パネルを再送信"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="ロール管理",
+        value=(
+            "`!rp add <パネルID> <@ロール> [絵文字] [ラベル]` — ロールを追加\n"
+            "`!rp remove <パネルID> <@ロール>` — ロールを削除"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="編集",
+        value=(
+            "`!rp edit <パネルID> title <タイトル>` — タイトル変更\n"
+            "`!rp edit <パネルID> desc <説明文>` — 説明文変更\n"
+            "`!rp edit <パネルID> color <色名>` — 色変更"
+        ),
+        inline=False,
+    )
+    color_names = "  ".join(f"`{c}`" for c in COLOR_MAP.keys())
+    embed.add_field(name="使用可能な色", value=color_names, inline=False)
+    embed.add_field(
+        name="使い方の例",
+        value=(
+            "```\n"
+            "!rp create ロール選択\n"
+            "!rp add 1 @ゲーマー 🎮\n"
+            "!rp add 1 @アーティスト 🎨 お絵描き好き\n"
+            "!rp edit 1 desc 好きなロールを選んでね！\n"
+            "!rp edit 1 color 紫\n"
+            "```"
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="管理者権限が必要です")
+    await ctx.send(embed=embed)
+
+
 class RolePanelCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -50,25 +109,21 @@ class RolePanelCog(commands.Cog):
     @commands.has_permissions(administrator=True)
     @commands.guild_only()
     async def rp(self, ctx: commands.Context):
-        embed = discord.Embed(title="RolePanel ヘルプ", color=0x3498DB)
-        embed.description = (
-            "**!rp create <タイトル>** — パネル作成\n"
-            "**!rp add <パネルID> <ロール> [絵文字] [ラベル]** — ロール追加\n"
-            "**!rp remove <パネルID> <ロール>** — ロール削除\n"
-            "**!rp edit <パネルID> title <タイトル>** — タイトル変更\n"
-            "**!rp edit <パネルID> desc <説明>** — 説明変更\n"
-            "**!rp edit <パネルID> color <色名>** — 色変更\n"
-            "**!rp delete <パネルID>** — パネル削除\n"
-            "**!rp list** — パネル一覧\n"
-            "**!rp refresh <パネルID>** — パネル再送信\n"
-        )
-        color_names = " / ".join(COLOR_MAP.keys())
-        embed.add_field(name="使用可能な色", value=color_names, inline=False)
-        await ctx.send(embed=embed)
+        await send_help(ctx)
+
+    @rp.command(name="help")
+    @commands.has_permissions(administrator=True)
+    async def panel_help(self, ctx: commands.Context):
+        await send_help(ctx)
 
     @rp.command(name="create")
     @commands.has_permissions(administrator=True)
     async def panel_create(self, ctx: commands.Context, *, title: str):
+        title = strip_mentions(title)
+        if not title:
+            await ctx.send("❌ タイトルを指定してください。メンションはタイトルに使用できません。")
+            return
+
         panel_id = await create_panel(
             guild_id=ctx.guild.id,
             channel_id=ctx.channel.id,
@@ -92,7 +147,7 @@ class RolePanelCog(commands.Cog):
     async def panel_add_role(self, ctx: commands.Context, panel_id: int, role_text: str, emoji: str = None, *, label: str = None):
         panel = await get_panel(panel_id)
         if panel is None or panel["guild_id"] != ctx.guild.id:
-            await ctx.send("❌ パネルが見つかりません。")
+            await ctx.send("❌ パネルが見つかりません。`!rp list` で確認してください。")
             return
 
         role = parse_role(ctx, role_text)
@@ -159,6 +214,10 @@ class RolePanelCog(commands.Cog):
 
         field = field.lower()
         if field == "title":
+            value = strip_mentions(value)
+            if not value:
+                await ctx.send("❌ タイトルを指定してください。")
+                return
             await update_panel(panel_id, title=value)
         elif field in ("desc", "description"):
             await update_panel(panel_id, description=value)
@@ -194,14 +253,14 @@ class RolePanelCog(commands.Cog):
                 pass
 
         await delete_panel(panel_id)
-        await ctx.send(f"✅ パネル `{panel_id}` を削除しました。")
+        await ctx.send(f"✅ パネル `{panel_id}` (`{panel['title']}`) を削除しました。")
 
     @rp.command(name="list")
     @commands.has_permissions(administrator=True)
     async def panel_list(self, ctx: commands.Context):
         panels = await get_panels_for_guild(ctx.guild.id)
         if not panels:
-            await ctx.send("ロールパネルはまだ作成されていません。")
+            await ctx.send("ロールパネルはまだ作成されていません。\n`!rp create <タイトル>` で作成できます。")
             return
 
         embed = discord.Embed(title="ロールパネル一覧", color=0x3498DB)
@@ -251,9 +310,13 @@ class RolePanelCog(commands.Cog):
     @rp.error
     async def rp_error(self, ctx: commands.Context, error):
         if isinstance(error, commands.MissingPermissions):
-            await ctx.send("❌ このコマンドは管理者のみ使用できます。")
+            await ctx.send("❌ このコマンドは **管理者** のみ使用できます。")
         elif isinstance(error, commands.MissingRequiredArgument):
-            await ctx.send(f"❌ 引数が不足しています: `{error.param.name}`\n`!rp` でヘルプを確認してください。")
+            await ctx.send(f"❌ 引数が不足しています: `{error.param.name}`\n`!rp help` でヘルプを確認してください。")
+        elif isinstance(error, commands.BadArgument):
+            await ctx.send("❌ 引数の形式が正しくありません。\n`!rp help` でヘルプを確認してください。")
+        elif isinstance(error, commands.CommandInvokeError):
+            await ctx.send("❌ コマンドの実行中にエラーが発生しました。")
 
 
 async def setup(bot: commands.Bot):
