@@ -28,6 +28,10 @@ COLOR_MAP = {
     "グレー": 0x95A5A6,
 }
 
+REPLY_DELETE = 10
+HELP_DELETE = 30
+ERROR_DELETE = 10
+
 
 def parse_role(ctx: commands.Context, text: str) -> discord.Role | None:
     mention = re.match(r"<@&(\d+)>", text)
@@ -49,7 +53,15 @@ def strip_mentions(text: str) -> str:
     return text.strip()
 
 
+async def try_delete_command(ctx: commands.Context):
+    try:
+        await ctx.message.delete()
+    except (discord.Forbidden, discord.NotFound):
+        pass
+
+
 async def send_help(ctx: commands.Context):
+    await try_delete_command(ctx)
     embed = discord.Embed(
         title="RolePanel — ヘルプ",
         description="ロールパネルの管理コマンド一覧です。\n全てのコマンドは **管理者限定** です。",
@@ -97,8 +109,8 @@ async def send_help(ctx: commands.Context):
         ),
         inline=False,
     )
-    embed.set_footer(text="管理者権限が必要です")
-    await ctx.send(embed=embed)
+    embed.set_footer(text=f"管理者権限が必要です ・ {HELP_DELETE}秒後に削除されます")
+    await ctx.send(embed=embed, delete_after=HELP_DELETE)
 
 
 class RolePanelCog(commands.Cog):
@@ -119,9 +131,10 @@ class RolePanelCog(commands.Cog):
     @rp.command(name="create")
     @commands.has_permissions(administrator=True)
     async def panel_create(self, ctx: commands.Context, *, title: str):
+        await try_delete_command(ctx)
         title = strip_mentions(title)
         if not title:
-            await ctx.send("❌ タイトルを指定してください。メンションはタイトルに使用できません。")
+            await ctx.send("❌ タイトルを指定してください。メンションはタイトルに使用できません。", delete_after=ERROR_DELETE)
             return
 
         panel_id = await create_panel(
@@ -139,84 +152,88 @@ class RolePanelCog(commands.Cog):
 
         await ctx.send(
             f"✅ ロールパネル **{title}** (ID: `{panel_id}`) を作成しました。\n"
-            f"`!rp add {panel_id} @ロール` でロールを追加してください。"
+            f"`!rp add {panel_id} @ロール` でロールを追加してください。",
+            delete_after=REPLY_DELETE,
         )
 
     @rp.command(name="add")
     @commands.has_permissions(administrator=True)
     async def panel_add_role(self, ctx: commands.Context, panel_id: int, role_text: str, emoji: str = None, *, label: str = None):
+        await try_delete_command(ctx)
         panel = await get_panel(panel_id)
         if panel is None or panel["guild_id"] != ctx.guild.id:
-            await ctx.send("❌ パネルが見つかりません。`!rp list` で確認してください。")
+            await ctx.send("❌ パネルが見つかりません。`!rp list` で確認してください。", delete_after=ERROR_DELETE)
             return
 
         role = parse_role(ctx, role_text)
         if role is None:
-            await ctx.send("❌ ロールが見つかりません。メンション・ID・名前で指定してください。")
+            await ctx.send("❌ ロールが見つかりません。メンション・ID・名前で指定してください。", delete_after=ERROR_DELETE)
             return
 
         existing_roles = await get_roles_for_panel(panel_id)
         if len(existing_roles) >= 25:
-            await ctx.send("❌ 1つのパネルに追加できるロールは最大25個です。")
+            await ctx.send("❌ 1つのパネルに追加できるロールは最大25個です。", delete_after=ERROR_DELETE)
             return
 
         if any(r["role_id"] == role.id for r in existing_roles):
-            await ctx.send(f"❌ **{role.name}** は既にこのパネルに追加されています。")
+            await ctx.send(f"❌ **{role.name}** は既にこのパネルに追加されています。", delete_after=ERROR_DELETE)
             return
 
         bot_member = ctx.guild.me
         if role >= bot_member.top_role:
-            await ctx.send(f"❌ **{role.name}** はBotのロールより上位のため、付与/剥奪できません。")
+            await ctx.send(f"❌ **{role.name}** はBotのロールより上位のため、付与/剥奪できません。", delete_after=ERROR_DELETE)
             return
 
         if role.managed:
-            await ctx.send(f"❌ **{role.name}** は外部連携ロールのため追加できません。")
+            await ctx.send(f"❌ **{role.name}** は外部連携ロールのため追加できません。", delete_after=ERROR_DELETE)
             return
 
         display_label = label or role.name
         try:
             await add_role_to_panel(panel_id, role.id, display_label, emoji)
         except Exception:
-            await ctx.send("❌ ロールの追加に失敗しました。")
+            await ctx.send("❌ ロールの追加に失敗しました。", delete_after=ERROR_DELETE)
             return
 
-        await ctx.send(f"✅ **{role.name}** をパネル `{panel_id}` に追加しました。")
+        await ctx.send(f"✅ **{role.name}** をパネル `{panel_id}` に追加しました。", delete_after=REPLY_DELETE)
         await rebuild_panel_message(self.bot, await get_panel(panel_id))
 
     @rp.command(name="remove")
     @commands.has_permissions(administrator=True)
     async def panel_remove_role(self, ctx: commands.Context, panel_id: int, *, role_text: str):
+        await try_delete_command(ctx)
         panel = await get_panel(panel_id)
         if panel is None or panel["guild_id"] != ctx.guild.id:
-            await ctx.send("❌ パネルが見つかりません。")
+            await ctx.send("❌ パネルが見つかりません。", delete_after=ERROR_DELETE)
             return
 
         role = parse_role(ctx, role_text)
         if role is None:
-            await ctx.send("❌ ロールが見つかりません。")
+            await ctx.send("❌ ロールが見つかりません。", delete_after=ERROR_DELETE)
             return
 
         removed = await remove_role_from_panel(panel_id, role.id)
         if not removed:
-            await ctx.send(f"❌ **{role.name}** はこのパネルに登録されていません。")
+            await ctx.send(f"❌ **{role.name}** はこのパネルに登録されていません。", delete_after=ERROR_DELETE)
             return
 
-        await ctx.send(f"✅ **{role.name}** をパネル `{panel_id}` から削除しました。")
+        await ctx.send(f"✅ **{role.name}** をパネル `{panel_id}` から削除しました。", delete_after=REPLY_DELETE)
         await rebuild_panel_message(self.bot, await get_panel(panel_id))
 
     @rp.command(name="edit")
     @commands.has_permissions(administrator=True)
     async def panel_edit(self, ctx: commands.Context, panel_id: int, field: str, *, value: str):
+        await try_delete_command(ctx)
         panel = await get_panel(panel_id)
         if panel is None or panel["guild_id"] != ctx.guild.id:
-            await ctx.send("❌ パネルが見つかりません。")
+            await ctx.send("❌ パネルが見つかりません。", delete_after=ERROR_DELETE)
             return
 
         field = field.lower()
         if field == "title":
             value = strip_mentions(value)
             if not value:
-                await ctx.send("❌ タイトルを指定してください。")
+                await ctx.send("❌ タイトルを指定してください。", delete_after=ERROR_DELETE)
                 return
             await update_panel(panel_id, title=value)
         elif field in ("desc", "description"):
@@ -225,22 +242,23 @@ class RolePanelCog(commands.Cog):
             color_value = COLOR_MAP.get(value)
             if color_value is None:
                 names = " / ".join(COLOR_MAP.keys())
-                await ctx.send(f"❌ 不明な色です。使用可能: {names}")
+                await ctx.send(f"❌ 不明な色です。使用可能: {names}", delete_after=ERROR_DELETE)
                 return
             await update_panel(panel_id, color=color_value)
         else:
-            await ctx.send("❌ フィールドは `title` / `desc` / `color` のいずれかを指定してください。")
+            await ctx.send("❌ フィールドは `title` / `desc` / `color` のいずれかを指定してください。", delete_after=ERROR_DELETE)
             return
 
-        await ctx.send(f"✅ パネル `{panel_id}` を更新しました。")
+        await ctx.send(f"✅ パネル `{panel_id}` を更新しました。", delete_after=REPLY_DELETE)
         await rebuild_panel_message(self.bot, await get_panel(panel_id))
 
     @rp.command(name="delete")
     @commands.has_permissions(administrator=True)
     async def panel_delete(self, ctx: commands.Context, panel_id: int):
+        await try_delete_command(ctx)
         panel = await get_panel(panel_id)
         if panel is None or panel["guild_id"] != ctx.guild.id:
-            await ctx.send("❌ パネルが見つかりません。")
+            await ctx.send("❌ パネルが見つかりません。", delete_after=ERROR_DELETE)
             return
 
         if panel.get("message_id"):
@@ -253,14 +271,15 @@ class RolePanelCog(commands.Cog):
                 pass
 
         await delete_panel(panel_id)
-        await ctx.send(f"✅ パネル `{panel_id}` (`{panel['title']}`) を削除しました。")
+        await ctx.send(f"✅ パネル `{panel_id}` (`{panel['title']}`) を削除しました。", delete_after=REPLY_DELETE)
 
     @rp.command(name="list")
     @commands.has_permissions(administrator=True)
     async def panel_list(self, ctx: commands.Context):
+        await try_delete_command(ctx)
         panels = await get_panels_for_guild(ctx.guild.id)
         if not panels:
-            await ctx.send("ロールパネルはまだ作成されていません。\n`!rp create <タイトル>` で作成できます。")
+            await ctx.send("ロールパネルはまだ作成されていません。\n`!rp create <タイトル>` で作成できます。", delete_after=ERROR_DELETE)
             return
 
         embed = discord.Embed(title="ロールパネル一覧", color=0x3498DB)
@@ -274,14 +293,16 @@ class RolePanelCog(commands.Cog):
                 inline=False,
             )
 
-        await ctx.send(embed=embed)
+        embed.set_footer(text=f"{HELP_DELETE}秒後に削除されます")
+        await ctx.send(embed=embed, delete_after=HELP_DELETE)
 
     @rp.command(name="refresh")
     @commands.has_permissions(administrator=True)
     async def panel_refresh(self, ctx: commands.Context, panel_id: int):
+        await try_delete_command(ctx)
         panel = await get_panel(panel_id)
         if panel is None or panel["guild_id"] != ctx.guild.id:
-            await ctx.send("❌ パネルが見つかりません。")
+            await ctx.send("❌ パネルが見つかりません。", delete_after=ERROR_DELETE)
             return
 
         if panel.get("message_id"):
@@ -296,7 +317,7 @@ class RolePanelCog(commands.Cog):
         roles = await get_roles_for_panel(panel_id)
         channel = self.bot.get_channel(panel["channel_id"])
         if channel is None:
-            await ctx.send("❌ パネルのチャンネルが見つかりません。")
+            await ctx.send("❌ パネルのチャンネルが見つかりません。", delete_after=ERROR_DELETE)
             return
 
         embed = await build_panel_embed(panel, roles, ctx.guild)
@@ -305,18 +326,19 @@ class RolePanelCog(commands.Cog):
         msg = await channel.send(embed=embed, view=view)
         await update_panel_message_id(panel_id, msg.id)
 
-        await ctx.send(f"✅ パネル `{panel_id}` を再送信しました。")
+        await ctx.send(f"✅ パネル `{panel_id}` を再送信しました。", delete_after=REPLY_DELETE)
 
     @rp.error
     async def rp_error(self, ctx: commands.Context, error):
+        await try_delete_command(ctx)
         if isinstance(error, commands.MissingPermissions):
-            await ctx.send("❌ このコマンドは **管理者** のみ使用できます。")
+            await ctx.send("❌ このコマンドは **管理者** のみ使用できます。", delete_after=ERROR_DELETE)
         elif isinstance(error, commands.MissingRequiredArgument):
-            await ctx.send(f"❌ 引数が不足しています: `{error.param.name}`\n`!rp help` でヘルプを確認してください。")
+            await ctx.send(f"❌ 引数が不足しています: `{error.param.name}`\n`!rp help` でヘルプを確認してください。", delete_after=ERROR_DELETE)
         elif isinstance(error, commands.BadArgument):
-            await ctx.send("❌ 引数の形式が正しくありません。\n`!rp help` でヘルプを確認してください。")
+            await ctx.send("❌ 引数の形式が正しくありません。\n`!rp help` でヘルプを確認してください。", delete_after=ERROR_DELETE)
         elif isinstance(error, commands.CommandInvokeError):
-            await ctx.send("❌ コマンドの実行中にエラーが発生しました。")
+            await ctx.send("❌ コマンドの実行中にエラーが発生しました。", delete_after=ERROR_DELETE)
 
 
 async def setup(bot: commands.Bot):
