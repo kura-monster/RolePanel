@@ -13,12 +13,12 @@ class RolePanelBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.members = True
+        intents.message_content = True
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
         await init_db()
         await self.load_extension("cogs.rolepanel")
-        await self.tree.sync()
 
     async def on_ready(self):
         print(f"ログイン完了: {self.user} (ID: {self.user.id})")

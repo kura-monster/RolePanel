@@ -1,5 +1,5 @@
+import re
 import discord
-from discord import app_commands
 from discord.ext import commands
 
 from database import (
@@ -15,215 +15,173 @@ from database import (
 )
 from views import build_panel_embed, RolePanelView, rebuild_panel_message
 
-COLOR_CHOICES = [
-    app_commands.Choice(name="青", value=0x3498DB),
-    app_commands.Choice(name="赤", value=0xE74C3C),
-    app_commands.Choice(name="緑", value=0x2ECC71),
-    app_commands.Choice(name="黄色", value=0xF1C40F),
-    app_commands.Choice(name="紫", value=0x9B59B6),
-    app_commands.Choice(name="オレンジ", value=0xE67E22),
-    app_commands.Choice(name="ピンク", value=0xFD79A8),
-    app_commands.Choice(name="水色", value=0x00CEC9),
-    app_commands.Choice(name="白", value=0xFFFFFF),
-    app_commands.Choice(name="グレー", value=0x95A5A6),
-]
+COLOR_MAP = {
+    "青": 0x3498DB,
+    "赤": 0xE74C3C,
+    "緑": 0x2ECC71,
+    "黄色": 0xF1C40F,
+    "紫": 0x9B59B6,
+    "オレンジ": 0xE67E22,
+    "ピンク": 0xFD79A8,
+    "水色": 0x00CEC9,
+    "白": 0xFFFFFF,
+    "グレー": 0x95A5A6,
+}
+
+
+def parse_role(ctx: commands.Context, text: str) -> discord.Role | None:
+    mention = re.match(r"<@&(\d+)>", text)
+    if mention:
+        return ctx.guild.get_role(int(mention.group(1)))
+    if text.isdigit():
+        return ctx.guild.get_role(int(text))
+    text_lower = text.lower()
+    for role in ctx.guild.roles:
+        if role.name.lower() == text_lower:
+            return role
+    return None
 
 
 class RolePanelCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    group = app_commands.Group(
-        name="rolepanel",
-        description="ロールパネルの管理コマンド",
-        default_permissions=discord.Permissions(administrator=True),
-    )
+    @commands.group(name="rp", invoke_without_command=True)
+    @commands.has_permissions(administrator=True)
+    @commands.guild_only()
+    async def rp(self, ctx: commands.Context):
+        embed = discord.Embed(title="RolePanel ヘルプ", color=0x3498DB)
+        embed.description = (
+            "**!rp create <タイトル>** — パネル作成\n"
+            "**!rp add <パネルID> <ロール> [絵文字] [ラベル]** — ロール追加\n"
+            "**!rp remove <パネルID> <ロール>** — ロール削除\n"
+            "**!rp edit <パネルID> title <タイトル>** — タイトル変更\n"
+            "**!rp edit <パネルID> desc <説明>** — 説明変更\n"
+            "**!rp edit <パネルID> color <色名>** — 色変更\n"
+            "**!rp delete <パネルID>** — パネル削除\n"
+            "**!rp list** — パネル一覧\n"
+            "**!rp refresh <パネルID>** — パネル再送信\n"
+        )
+        color_names = " / ".join(COLOR_MAP.keys())
+        embed.add_field(name="使用可能な色", value=color_names, inline=False)
+        await ctx.send(embed=embed)
 
-    @group.command(name="create", description="新しいロールパネルを作成します")
-    @app_commands.describe(
-        title="パネルのタイトル",
-        description="パネルの説明文（任意）",
-        color="パネルの色（任意）",
-        channel="パネルを送信するチャンネル（任意、省略で現在のチャンネル）",
-    )
-    @app_commands.choices(color=COLOR_CHOICES)
-    async def panel_create(
-        self,
-        interaction: discord.Interaction,
-        title: str,
-        description: str = "",
-        color: app_commands.Choice[int] = None,
-        channel: discord.TextChannel = None,
-    ):
-        target_channel = channel or interaction.channel
-        color_value = color.value if color else 0x3498DB
-
+    @rp.command(name="create")
+    @commands.has_permissions(administrator=True)
+    async def panel_create(self, ctx: commands.Context, *, title: str):
         panel_id = await create_panel(
-            guild_id=interaction.guild_id,
-            channel_id=target_channel.id,
+            guild_id=ctx.guild.id,
+            channel_id=ctx.channel.id,
             title=title,
-            description=description,
-            color=color_value,
         )
 
         panel = await get_panel(panel_id)
         roles = await get_roles_for_panel(panel_id)
-        embed = await build_panel_embed(panel, roles, interaction.guild)
+        embed = await build_panel_embed(panel, roles, ctx.guild)
 
-        try:
-            msg = await target_channel.send(embed=embed, view=discord.ui.View())
-            await update_panel_message_id(panel_id, msg.id)
-        except discord.Forbidden:
-            await interaction.response.send_message(
-                f"❌ {target_channel.mention} にメッセージを送信する権限がありません。",
-                ephemeral=True,
-            )
-            await delete_panel(panel_id)
-            return
+        msg = await ctx.channel.send(embed=embed, view=discord.ui.View())
+        await update_panel_message_id(panel_id, msg.id)
 
-        await interaction.response.send_message(
-            f"✅ ロールパネル **{title}** (ID: `{panel_id}`) を {target_channel.mention} に作成しました。\n"
-            f"`/rolepanel add` でロールを追加してください。",
-            ephemeral=True,
+        await ctx.send(
+            f"✅ ロールパネル **{title}** (ID: `{panel_id}`) を作成しました。\n"
+            f"`!rp add {panel_id} @ロール` でロールを追加してください。"
         )
 
-    @group.command(name="add", description="パネルにロールを追加します")
-    @app_commands.describe(
-        panel_id="パネルID",
-        role="追加するロール",
-        label="ボタンに表示するラベル（任意、省略でロール名）",
-        emoji="ボタンに表示する絵文字（任意）",
-        description="ロールの説明（任意）",
-    )
-    async def panel_add_role(
-        self,
-        interaction: discord.Interaction,
-        panel_id: int,
-        role: discord.Role,
-        label: str = None,
-        emoji: str = None,
-        description: str = "",
-    ):
+    @rp.command(name="add")
+    @commands.has_permissions(administrator=True)
+    async def panel_add_role(self, ctx: commands.Context, panel_id: int, role_text: str, emoji: str = None, *, label: str = None):
         panel = await get_panel(panel_id)
-        if panel is None or panel["guild_id"] != interaction.guild_id:
-            await interaction.response.send_message("❌ パネルが見つかりません。", ephemeral=True)
+        if panel is None or panel["guild_id"] != ctx.guild.id:
+            await ctx.send("❌ パネルが見つかりません。")
+            return
+
+        role = parse_role(ctx, role_text)
+        if role is None:
+            await ctx.send("❌ ロールが見つかりません。メンション・ID・名前で指定してください。")
             return
 
         existing_roles = await get_roles_for_panel(panel_id)
         if len(existing_roles) >= 25:
-            await interaction.response.send_message(
-                "❌ 1つのパネルに追加できるロールは最大25個です。", ephemeral=True
-            )
+            await ctx.send("❌ 1つのパネルに追加できるロールは最大25個です。")
             return
 
         if any(r["role_id"] == role.id for r in existing_roles):
-            await interaction.response.send_message(
-                f"❌ **{role.name}** は既にこのパネルに追加されています。", ephemeral=True
-            )
+            await ctx.send(f"❌ **{role.name}** は既にこのパネルに追加されています。")
             return
 
-        bot_member = interaction.guild.me
+        bot_member = ctx.guild.me
         if role >= bot_member.top_role:
-            await interaction.response.send_message(
-                f"❌ **{role.name}** はBotのロールより上位のため、付与/剥奪できません。",
-                ephemeral=True,
-            )
+            await ctx.send(f"❌ **{role.name}** はBotのロールより上位のため、付与/剥奪できません。")
             return
 
         if role.managed:
-            await interaction.response.send_message(
-                f"❌ **{role.name}** は外部連携ロールのため追加できません。", ephemeral=True
-            )
+            await ctx.send(f"❌ **{role.name}** は外部連携ロールのため追加できません。")
             return
 
         display_label = label or role.name
         try:
-            await add_role_to_panel(panel_id, role.id, display_label, emoji, description)
+            await add_role_to_panel(panel_id, role.id, display_label, emoji)
         except Exception:
-            await interaction.response.send_message(
-                "❌ ロールの追加に失敗しました。", ephemeral=True
-            )
+            await ctx.send("❌ ロールの追加に失敗しました。")
             return
 
-        await interaction.response.send_message(
-            f"✅ **{role.name}** をパネル `{panel_id}` に追加しました。", ephemeral=True
-        )
+        await ctx.send(f"✅ **{role.name}** をパネル `{panel_id}` に追加しました。")
         await rebuild_panel_message(self.bot, await get_panel(panel_id))
 
-    @group.command(name="remove", description="パネルからロールを削除します")
-    @app_commands.describe(panel_id="パネルID", role="削除するロール")
-    async def panel_remove_role(
-        self,
-        interaction: discord.Interaction,
-        panel_id: int,
-        role: discord.Role,
-    ):
+    @rp.command(name="remove")
+    @commands.has_permissions(administrator=True)
+    async def panel_remove_role(self, ctx: commands.Context, panel_id: int, *, role_text: str):
         panel = await get_panel(panel_id)
-        if panel is None or panel["guild_id"] != interaction.guild_id:
-            await interaction.response.send_message("❌ パネルが見つかりません。", ephemeral=True)
+        if panel is None or panel["guild_id"] != ctx.guild.id:
+            await ctx.send("❌ パネルが見つかりません。")
+            return
+
+        role = parse_role(ctx, role_text)
+        if role is None:
+            await ctx.send("❌ ロールが見つかりません。")
             return
 
         removed = await remove_role_from_panel(panel_id, role.id)
         if not removed:
-            await interaction.response.send_message(
-                f"❌ **{role.name}** はこのパネルに登録されていません。", ephemeral=True
-            )
+            await ctx.send(f"❌ **{role.name}** はこのパネルに登録されていません。")
             return
 
-        await interaction.response.send_message(
-            f"✅ **{role.name}** をパネル `{panel_id}` から削除しました。", ephemeral=True
-        )
+        await ctx.send(f"✅ **{role.name}** をパネル `{panel_id}` から削除しました。")
         await rebuild_panel_message(self.bot, await get_panel(panel_id))
 
-    @group.command(name="edit", description="パネルのタイトルや説明を編集します")
-    @app_commands.describe(
-        panel_id="パネルID",
-        title="新しいタイトル（任意）",
-        description="新しい説明文（任意）",
-        color="新しい色（任意）",
-    )
-    @app_commands.choices(color=COLOR_CHOICES)
-    async def panel_edit(
-        self,
-        interaction: discord.Interaction,
-        panel_id: int,
-        title: str = None,
-        description: str = None,
-        color: app_commands.Choice[int] = None,
-    ):
+    @rp.command(name="edit")
+    @commands.has_permissions(administrator=True)
+    async def panel_edit(self, ctx: commands.Context, panel_id: int, field: str, *, value: str):
         panel = await get_panel(panel_id)
-        if panel is None or panel["guild_id"] != interaction.guild_id:
-            await interaction.response.send_message("❌ パネルが見つかりません。", ephemeral=True)
+        if panel is None or panel["guild_id"] != ctx.guild.id:
+            await ctx.send("❌ パネルが見つかりません。")
             return
 
-        if title is None and description is None and color is None:
-            await interaction.response.send_message(
-                "❌ 変更する内容を1つ以上指定してください。", ephemeral=True
-            )
+        field = field.lower()
+        if field == "title":
+            await update_panel(panel_id, title=value)
+        elif field in ("desc", "description"):
+            await update_panel(panel_id, description=value)
+        elif field == "color":
+            color_value = COLOR_MAP.get(value)
+            if color_value is None:
+                names = " / ".join(COLOR_MAP.keys())
+                await ctx.send(f"❌ 不明な色です。使用可能: {names}")
+                return
+            await update_panel(panel_id, color=color_value)
+        else:
+            await ctx.send("❌ フィールドは `title` / `desc` / `color` のいずれかを指定してください。")
             return
 
-        await update_panel(
-            panel_id,
-            title=title,
-            description=description,
-            color=color.value if color else None,
-        )
-
-        await interaction.response.send_message(
-            f"✅ パネル `{panel_id}` を更新しました。", ephemeral=True
-        )
+        await ctx.send(f"✅ パネル `{panel_id}` を更新しました。")
         await rebuild_panel_message(self.bot, await get_panel(panel_id))
 
-    @group.command(name="delete", description="ロールパネルを削除します")
-    @app_commands.describe(panel_id="削除するパネルID")
-    async def panel_delete(
-        self,
-        interaction: discord.Interaction,
-        panel_id: int,
-    ):
+    @rp.command(name="delete")
+    @commands.has_permissions(administrator=True)
+    async def panel_delete(self, ctx: commands.Context, panel_id: int):
         panel = await get_panel(panel_id)
-        if panel is None or panel["guild_id"] != interaction.guild_id:
-            await interaction.response.send_message("❌ パネルが見つかりません。", ephemeral=True)
+        if panel is None or panel["guild_id"] != ctx.guild.id:
+            await ctx.send("❌ パネルが見つかりません。")
             return
 
         if panel.get("message_id"):
@@ -236,17 +194,14 @@ class RolePanelCog(commands.Cog):
                 pass
 
         await delete_panel(panel_id)
-        await interaction.response.send_message(
-            f"✅ パネル `{panel_id}` を削除しました。", ephemeral=True
-        )
+        await ctx.send(f"✅ パネル `{panel_id}` を削除しました。")
 
-    @group.command(name="list", description="このサーバーのロールパネル一覧を表示します")
-    async def panel_list(self, interaction: discord.Interaction):
-        panels = await get_panels_for_guild(interaction.guild_id)
+    @rp.command(name="list")
+    @commands.has_permissions(administrator=True)
+    async def panel_list(self, ctx: commands.Context):
+        panels = await get_panels_for_guild(ctx.guild.id)
         if not panels:
-            await interaction.response.send_message(
-                "ロールパネルはまだ作成されていません。", ephemeral=True
-            )
+            await ctx.send("ロールパネルはまだ作成されていません。")
             return
 
         embed = discord.Embed(title="ロールパネル一覧", color=0x3498DB)
@@ -260,18 +215,14 @@ class RolePanelCog(commands.Cog):
                 inline=False,
             )
 
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await ctx.send(embed=embed)
 
-    @group.command(name="refresh", description="パネルのメッセージを再送信します")
-    @app_commands.describe(panel_id="パネルID")
-    async def panel_refresh(
-        self,
-        interaction: discord.Interaction,
-        panel_id: int,
-    ):
+    @rp.command(name="refresh")
+    @commands.has_permissions(administrator=True)
+    async def panel_refresh(self, ctx: commands.Context, panel_id: int):
         panel = await get_panel(panel_id)
-        if panel is None or panel["guild_id"] != interaction.guild_id:
-            await interaction.response.send_message("❌ パネルが見つかりません。", ephemeral=True)
+        if panel is None or panel["guild_id"] != ctx.guild.id:
+            await ctx.send("❌ パネルが見つかりません。")
             return
 
         if panel.get("message_id"):
@@ -286,26 +237,23 @@ class RolePanelCog(commands.Cog):
         roles = await get_roles_for_panel(panel_id)
         channel = self.bot.get_channel(panel["channel_id"])
         if channel is None:
-            await interaction.response.send_message(
-                "❌ パネルのチャンネルが見つかりません。", ephemeral=True
-            )
+            await ctx.send("❌ パネルのチャンネルが見つかりません。")
             return
 
-        embed = await build_panel_embed(panel, roles, interaction.guild)
+        embed = await build_panel_embed(panel, roles, ctx.guild)
         view = RolePanelView(roles) if roles else discord.ui.View()
 
-        try:
-            msg = await channel.send(embed=embed, view=view)
-            await update_panel_message_id(panel_id, msg.id)
-        except discord.Forbidden:
-            await interaction.response.send_message(
-                f"❌ チャンネルにメッセージを送信する権限がありません。", ephemeral=True
-            )
-            return
+        msg = await channel.send(embed=embed, view=view)
+        await update_panel_message_id(panel_id, msg.id)
 
-        await interaction.response.send_message(
-            f"✅ パネル `{panel_id}` を再送信しました。", ephemeral=True
-        )
+        await ctx.send(f"✅ パネル `{panel_id}` を再送信しました。")
+
+    @rp.error
+    async def rp_error(self, ctx: commands.Context, error):
+        if isinstance(error, commands.MissingPermissions):
+            await ctx.send("❌ このコマンドは管理者のみ使用できます。")
+        elif isinstance(error, commands.MissingRequiredArgument):
+            await ctx.send(f"❌ 引数が不足しています: `{error.param.name}`\n`!rp` でヘルプを確認してください。")
 
 
 async def setup(bot: commands.Bot):
